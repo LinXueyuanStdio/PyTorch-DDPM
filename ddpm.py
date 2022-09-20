@@ -2,9 +2,6 @@ import os
 import math
 from abc import abstractmethod
 
-from PIL import Image
-import requests
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -12,15 +9,16 @@ from torchvision import datasets, transforms
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
-# use sinusoidal position embedding to encode time step (https://arxiv.org/abs/1706.03762)
 def timestep_embedding(timesteps, dim, max_period=10000):
-    """
-    Create sinusoidal timestep embeddings.
-    :param timesteps: a 1-D Tensor of N indices, one per batch element.
-                      These may be fractional.
-    :param dim: the dimension of the output.
-    :param max_period: controls the minimum frequency of the embeddings.
-    :return: an [N x dim] Tensor of positional embeddings.
+    """Create sinusoidal timestep embeddings.
+
+    Args:
+        timesteps (Tensor): a 1-D Tensor of N indices, one per batch element. These may be fractional.
+        dim (int): the dimension of the output.
+        max_period (int, optional): controls the minimum frequency of the embeddings. Defaults to 10000.
+
+    Returns:
+        Tensor: an [N x dim] Tensor of positional embeddings.
     """
     half = dim // 2
     freqs = torch.exp(
@@ -32,7 +30,6 @@ def timestep_embedding(timesteps, dim, max_period=10000):
         embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
     return embedding
 
-# define TimestepEmbedSequential to support `time_emb` as extra input
 class TimestepBlock(nn.Module):
     """
     Any module where forward() takes timestep embeddings as a second argument.
@@ -47,8 +44,7 @@ class TimestepBlock(nn.Module):
 
 class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
     """
-    A sequential module that passes timestep embeddings to the children that
-    support it as an extra input.
+    A sequential module that passes timestep embeddings to the children that support it as an extra input.
     """
 
     def forward(self, x, t):
@@ -59,11 +55,9 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
                 x = layer(x)
         return x
 
-# use GN for norm layer
 def norm_layer(channels):
     return nn.GroupNorm(32, channels)
 
-# Residual block
 class ResidualBlock(TimestepBlock):
     def __init__(self, in_channels, out_channels, time_channels, dropout):
         super().__init__()
@@ -103,9 +97,15 @@ class ResidualBlock(TimestepBlock):
         h = self.conv2(h)
         return h + self.shortcut(x)
 
-# Attention block with shortcut
 class AttentionBlock(nn.Module):
     def __init__(self, channels, num_heads=1):
+        """
+        Attention block with shortcut
+
+        Args:
+            channels (int): channels
+            num_heads (int, optional): attention heads. Defaults to 1.
+        """
         super().__init__()
         self.num_heads = num_heads
         assert channels % num_heads == 0
@@ -126,7 +126,6 @@ class AttentionBlock(nn.Module):
         h = self.proj(h)
         return h + x
 
-# upsample
 class Upsample(nn.Module):
     def __init__(self, channels, use_conv):
         super().__init__()
@@ -140,7 +139,6 @@ class Upsample(nn.Module):
             x = self.conv(x)
         return x
 
-# downsample
 class Downsample(nn.Module):
     def __init__(self, channels, use_conv):
         super().__init__()
@@ -152,8 +150,11 @@ class Downsample(nn.Module):
 
     def forward(self, x):
         return self.op(x)
-# The full UNet model with attention and timestep embedding
+
 class UNetModel(nn.Module):
+    """
+    The full UNet model with attention and timestep embedding
+    """
     def __init__(
         self,
         in_channels=3,
@@ -242,11 +243,14 @@ class UNetModel(nn.Module):
         )
 
     def forward(self, x, timesteps):
-        """
-        Apply the model to an input batch.
-        :param x: an [N x C x H x W] Tensor of inputs.
-        :param timesteps: a 1-D batch of timesteps.
-        :return: an [N x C x ...] Tensor of outputs.
+        """Apply the model to an input batch.
+
+        Args:
+            x (Tensor): [N x C x H x W]
+            timesteps (Tensor): a 1-D batch of timesteps.
+
+        Returns:
+            Tensor: [N x C x ...]
         """
         hs = []
         # time step embedding
@@ -264,8 +268,11 @@ class UNetModel(nn.Module):
             cat_in = torch.cat([h, hs.pop()], dim=1)
             h = module(cat_in, emb)
         return self.out(h)
-# beta schedule
+
 def linear_beta_schedule(timesteps):
+    """
+    beta schedule
+    """
     scale = 1000 / timesteps
     beta_start = scale * 0.0001
     beta_end = scale * 0.02
@@ -282,6 +289,7 @@ def cosine_beta_schedule(timesteps, s=0.008):
     alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
     betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
     return torch.clip(betas, 0, 0.999)
+
 class GaussianDiffusion:
     def __init__(
         self,
@@ -326,15 +334,15 @@ class GaussianDiffusion:
             / (1.0 - self.alphas_cumprod)
         )
 
-    # get the param of given timestep t
     def _extract(self, a, t, x_shape):
+        # get the param of given timestep t
         batch_size = t.shape[0]
         out = a.to(t.device).gather(0, t).float()
         out = out.reshape(batch_size, *((1,) * (len(x_shape) - 1)))
         return out
 
-    # forward diffusion (using the nice property): q(x_t | x_0)
     def q_sample(self, x_start, t, noise=None):
+        # forward diffusion (using the nice property): q(x_t | x_0)
         if noise is None:
             noise = torch.randn_like(x_start)
 
@@ -343,15 +351,15 @@ class GaussianDiffusion:
 
         return sqrt_alphas_cumprod_t * x_start + sqrt_one_minus_alphas_cumprod_t * noise
 
-    # Get the mean and variance of q(x_t | x_0).
     def q_mean_variance(self, x_start, t):
+        # Get the mean and variance of q(x_t | x_0).
         mean = self._extract(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start
         variance = self._extract(1.0 - self.alphas_cumprod, t, x_start.shape)
         log_variance = self._extract(self.log_one_minus_alphas_cumprod, t, x_start.shape)
         return mean, variance, log_variance
 
-    # Compute the mean and variance of the diffusion posterior: q(x_{t-1} | x_t, x_0)
     def q_posterior_mean_variance(self, x_start, x_t, t):
+        # Compute the mean and variance of the diffusion posterior: q(x_{t-1} | x_t, x_0)
         posterior_mean = (
             self._extract(self.posterior_mean_coef1, t, x_t.shape) * x_start
             + self._extract(self.posterior_mean_coef2, t, x_t.shape) * x_t
@@ -360,31 +368,29 @@ class GaussianDiffusion:
         posterior_log_variance_clipped = self._extract(self.posterior_log_variance_clipped, t, x_t.shape)
         return posterior_mean, posterior_variance, posterior_log_variance_clipped
 
-    # compute x_0 from x_t and pred noise: the reverse of `q_sample`
     def predict_start_from_noise(self, x_t, t, noise):
+        # compute x_0 from x_t and pred noise: the reverse of `q_sample`
         return (
             self._extract(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t -
             self._extract(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape) * noise
         )
 
-    # compute predicted mean and variance of p(x_{t-1} | x_t)
     def p_mean_variance(self, model, x_t, t, clip_denoised=True):
+        # compute predicted mean and variance of p(x_{t-1} | x_t)
         # predict noise using model
         pred_noise = model(x_t, t)
         # get the predicted x_0: different from the algorithm2 in the paper
         x_recon = self.predict_start_from_noise(x_t, t, pred_noise)
         if clip_denoised:
             x_recon = torch.clamp(x_recon, min=-1., max=1.)
-        model_mean, posterior_variance, posterior_log_variance = \
-                    self.q_posterior_mean_variance(x_recon, x_t, t)
+        model_mean, posterior_variance, posterior_log_variance = self.q_posterior_mean_variance(x_recon, x_t, t)
         return model_mean, posterior_variance, posterior_log_variance
 
-    # denoise_step: sample x_{t-1} from x_t and pred_noise
     @torch.no_grad()
     def p_sample(self, model, x_t, t, clip_denoised=True):
+        # denoise_step: sample x_{t-1} from x_t and pred_noise
         # predict mean and variance
-        model_mean, _, model_log_variance = self.p_mean_variance(model, x_t, t,
-                                                    clip_denoised=clip_denoised)
+        model_mean, _, model_log_variance = self.p_mean_variance(model, x_t, t, clip_denoised=clip_denoised)
         noise = torch.randn_like(x_t)
         # no noise when t == 0
         nonzero_mask = ((t != 0).float().view(-1, *([1] * (len(x_t.shape) - 1))))
@@ -392,9 +398,9 @@ class GaussianDiffusion:
         pred_img = model_mean + nonzero_mask * (0.5 * model_log_variance).exp() * noise
         return pred_img
 
-    # denoise: reverse diffusion
     @torch.no_grad()
     def p_sample_loop(self, model, shape):
+        # denoise: reverse diffusion
         batch_size = shape[0]
         device = next(model.parameters()).device
         # start from pure noise (for each example in the batch)
@@ -405,13 +411,13 @@ class GaussianDiffusion:
             imgs.append(img.cpu().numpy())
         return imgs
 
-    # sample new images
     @torch.no_grad()
     def sample(self, model, image_size, batch_size=8, channels=3):
+        # sample new images
         return self.p_sample_loop(model, shape=(batch_size, channels, image_size, image_size))
 
-    # compute train losses
     def train_losses(self, model, x_start, t):
+        # compute train losses
         # generate random noise
         noise = torch.randn_like(x_start)
         # get x_t
@@ -419,34 +425,6 @@ class GaussianDiffusion:
         predicted_noise = model(x_noisy, t)
         loss = F.mse_loss(noise, predicted_noise)
         return loss
-
-url = 'http://images.cocodataset.org/val2017/000000039769.jpg'
-image = Image.open(requests.get(url, stream=True).raw)
-# image = Image.open("/data/000000039769.jpg")
-
-image_size = 128
-transform = transforms.Compose([
-    transforms.Resize(image_size),
-    transforms.CenterCrop(image_size),
-    transforms.PILToTensor(),
-    transforms.ConvertImageDtype(torch.float),
-    transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
-])
-
-
-x_start = transform(image).unsqueeze(0)
-
-gaussian_diffusion = GaussianDiffusion(timesteps=500)
-
-plt.figure(figsize=(16, 8))
-for idx, t in enumerate([0, 50, 100, 200, 499]):
-    x_noisy = gaussian_diffusion.q_sample(x_start, t=torch.tensor([t]))
-    noisy_image = (x_noisy.squeeze().permute(1, 2, 0) + 1) * 127.5
-    noisy_image = noisy_image.numpy().astype(np.uint8)
-    plt.subplot(1, 5, 1 + idx)
-    plt.imshow(noisy_image)
-    plt.axis("off")
-    plt.title(f"t={t}")
 
 batch_size = 64
 timesteps = 500
@@ -457,7 +435,7 @@ transform = transforms.Compose([
 ])
 
 # use MNIST dataset
-dataset = datasets.MNIST('/data', train=True, download=True, transform=transform)
+dataset = datasets.MNIST('./data', train=True, download=True, transform=transform)
 train_loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
 # define model and diffusion
@@ -470,12 +448,11 @@ model = UNetModel(
     attention_resolutions=[]
 )
 model.to(device)
-
-gaussian_diffusion = GaussianDiffusion(timesteps=timesteps)
 optimizer = torch.optim.Adam(model.parameters(), lr=5e-4)
+gaussian_diffusion = GaussianDiffusion(timesteps=timesteps)
+
 # train
 epochs = 10
-
 for epoch in range(epochs):
     for step, (images, labels) in enumerate(train_loader):
         optimizer.zero_grad()
@@ -495,6 +472,7 @@ for epoch in range(epochs):
         optimizer.step()
 
 generated_images = gaussian_diffusion.sample(model, 28, batch_size=64, channels=1)
+# generated_images: [timesteps, batch_size=64, channels=1, height=28, width=28]
 
 # generate new images
 fig = plt.figure(figsize=(12, 12), constrained_layout=True)
