@@ -4,6 +4,12 @@
 
 如何实现？可参考个人精简后的公式： https://timecat.notion.site/DDPM-b8e2a91927d249fdbcf7c82f2eb6f846
 
+> 建议使用 codelab 打开 notebook，可以不用自己配环境了
+> 
+> [codelab: DDPM](https://colab.research.google.com/github/LinXueyuanStdio/PyTorch-DDPM/blob/master/DDPM.ipynb)
+> 
+> [codelab: Classifier-Free DDPM](https://colab.research.google.com/github/LinXueyuanStdio/PyTorch-DDPM/blob/master/ClassifierFreeDDPM.ipynb)
+
 ## DDPM
 
 从随机噪声中降噪生成图片
