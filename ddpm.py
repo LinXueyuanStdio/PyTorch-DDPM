@@ -9,6 +9,7 @@ from torchvision import datasets, transforms
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
+
 def timestep_embedding(timesteps, dim, max_period=10000):
     """Create sinusoidal timestep embeddings.
 
@@ -30,6 +31,68 @@ def timestep_embedding(timesteps, dim, max_period=10000):
         embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
     return embedding
 
+
+def norm_layer(channels):
+    return nn.GroupNorm(32, channels)
+
+
+class AttentionBlock(nn.Module):
+    def __init__(self, channels, num_heads=1):
+        """
+        Attention block with shortcut
+
+        Args:
+            channels (int): channels
+            num_heads (int, optional): attention heads. Defaults to 1.
+        """
+        super().__init__()
+        self.num_heads = num_heads
+        assert channels % num_heads == 0
+
+        self.norm = norm_layer(channels)
+        self.qkv = nn.Conv2d(channels, channels * 3, kernel_size=1, bias=False)
+        self.proj = nn.Conv2d(channels, channels, kernel_size=1)
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        qkv = self.qkv(self.norm(x))
+        q, k, v = qkv.reshape(B*self.num_heads, -1, H*W).chunk(3, dim=1)
+        scale = 1. / math.sqrt(math.sqrt(C // self.num_heads))
+        attn = torch.einsum("bct,bcs->bts", q * scale, k * scale)
+        attn = attn.softmax(dim=-1)
+        h = torch.einsum("bts,bcs->bct", attn, v)
+        h = h.reshape(B, -1, H, W)
+        h = self.proj(h)
+        return h + x
+
+
+class Upsample(nn.Module):
+    def __init__(self, channels, use_conv):
+        super().__init__()
+        self.use_conv = use_conv
+        if use_conv:
+            self.conv = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+
+    def forward(self, x):
+        x = F.interpolate(x, scale_factor=2, mode="nearest")
+        if self.use_conv:
+            x = self.conv(x)
+        return x
+
+
+class Downsample(nn.Module):
+    def __init__(self, channels, use_conv):
+        super().__init__()
+        self.use_conv = use_conv
+        if use_conv:
+            self.op = nn.Conv2d(channels, channels, kernel_size=3, stride=2, padding=1)
+        else:
+            self.op = nn.AvgPool2d(stride=2)
+
+    def forward(self, x):
+        return self.op(x)
+
+
 class TimestepBlock(nn.Module):
     """
     Any module where forward() takes timestep embeddings as a second argument.
@@ -40,6 +103,7 @@ class TimestepBlock(nn.Module):
         """
         Apply the module to `x` given `t` timestep embeddings.
         """
+        pass
 
 
 class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
@@ -55,8 +119,6 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
                 x = layer(x)
         return x
 
-def norm_layer(channels):
-    return nn.GroupNorm(32, channels)
 
 class ResidualBlock(TimestepBlock):
     def __init__(self, in_channels, out_channels, time_channels, dropout):
@@ -97,64 +159,13 @@ class ResidualBlock(TimestepBlock):
         h = self.conv2(h)
         return h + self.shortcut(x)
 
-class AttentionBlock(nn.Module):
-    def __init__(self, channels, num_heads=1):
-        """
-        Attention block with shortcut
 
-        Args:
-            channels (int): channels
-            num_heads (int, optional): attention heads. Defaults to 1.
-        """
-        super().__init__()
-        self.num_heads = num_heads
-        assert channels % num_heads == 0
-
-        self.norm = norm_layer(channels)
-        self.qkv = nn.Conv2d(channels, channels * 3, kernel_size=1, bias=False)
-        self.proj = nn.Conv2d(channels, channels, kernel_size=1)
-
-    def forward(self, x):
-        B, C, H, W = x.shape
-        qkv = self.qkv(self.norm(x))
-        q, k, v = qkv.reshape(B*self.num_heads, -1, H*W).chunk(3, dim=1)
-        scale = 1. / math.sqrt(math.sqrt(C // self.num_heads))
-        attn = torch.einsum("bct,bcs->bts", q * scale, k * scale)
-        attn = attn.softmax(dim=-1)
-        h = torch.einsum("bts,bcs->bct", attn, v)
-        h = h.reshape(B, -1, H, W)
-        h = self.proj(h)
-        return h + x
-
-class Upsample(nn.Module):
-    def __init__(self, channels, use_conv):
-        super().__init__()
-        self.use_conv = use_conv
-        if use_conv:
-            self.conv = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
-
-    def forward(self, x):
-        x = F.interpolate(x, scale_factor=2, mode="nearest")
-        if self.use_conv:
-            x = self.conv(x)
-        return x
-
-class Downsample(nn.Module):
-    def __init__(self, channels, use_conv):
-        super().__init__()
-        self.use_conv = use_conv
-        if use_conv:
-            self.op = nn.Conv2d(channels, channels, kernel_size=3, stride=2, padding=1)
-        else:
-            self.op = nn.AvgPool2d(stride=2)
-
-    def forward(self, x):
-        return self.op(x)
 
 class UNetModel(nn.Module):
     """
     The full UNet model with attention and timestep embedding
     """
+
     def __init__(
         self,
         in_channels=3,
@@ -204,7 +215,7 @@ class UNetModel(nn.Module):
                     layers.append(AttentionBlock(ch, num_heads=num_heads))
                 self.down_blocks.append(TimestepEmbedSequential(*layers))
                 down_block_chans.append(ch)
-            if level != len(channel_mult) - 1: # don't use downsample for the last stage
+            if level != len(channel_mult) - 1:  # don't use downsample for the last stage
                 self.down_blocks.append(TimestepEmbedSequential(Downsample(ch, conv_resample)))
                 down_block_chans.append(ch)
                 ds *= 2
@@ -242,32 +253,31 @@ class UNetModel(nn.Module):
             nn.Conv2d(model_channels, out_channels, kernel_size=3, padding=1),
         )
 
-    def forward(self, x, timesteps):
+    def forward(self, x: torch.FloatTensor, timesteps: torch.LongTensor):
         """Apply the model to an input batch.
 
         Args:
             x (Tensor): [N x C x H x W]
-            timesteps (Tensor): a 1-D batch of timesteps.
+            timesteps (Tensor): [N,] a 1-D batch of timesteps.
 
         Returns:
             Tensor: [N x C x ...]
         """
         hs = []
-        # time step embedding
-        emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
-
         # down stage
-        h = x
+        h: torch.FloatTensor = x
+        t: torch.FloatTensor = self.time_embed(timestep_embedding(timesteps, self.model_channels))
         for module in self.down_blocks:
-            h = module(h, emb)
+            h = module(h, t)
             hs.append(h)
         # middle stage
-        h = self.middle_block(h, emb)
+        h = self.middle_block(h, t)
         # up stage
         for module in self.up_blocks:
             cat_in = torch.cat([h, hs.pop()], dim=1)
-            h = module(cat_in, emb)
+            h = module(cat_in, t)
         return self.out(h)
+
 
 def linear_beta_schedule(timesteps):
     """
@@ -277,6 +287,7 @@ def linear_beta_schedule(timesteps):
     beta_start = scale * 0.0001
     beta_end = scale * 0.02
     return torch.linspace(beta_start, beta_end, timesteps, dtype=torch.float64)
+
 
 def cosine_beta_schedule(timesteps, s=0.008):
     """
@@ -289,6 +300,7 @@ def cosine_beta_schedule(timesteps, s=0.008):
     alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
     betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
     return torch.clip(betas, 0, 0.999)
+
 
 class GaussianDiffusion:
     def __init__(
@@ -318,30 +330,20 @@ class GaussianDiffusion:
         self.sqrt_recipm1_alphas_cumprod = torch.sqrt(1.0 / self.alphas_cumprod - 1)
 
         # calculations for posterior q(x_{t-1} | x_t, x_0)
-        self.posterior_variance = (
-            self.betas * (1.0 - self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod)
-        )
-        # below: log calculation clipped because the posterior variance is 0 at the beginning
-        # of the diffusion chain
-        self.posterior_log_variance_clipped = torch.log(self.posterior_variance.clamp(min =1e-20))
+        self.posterior_variance = self.betas * (1.0 - self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod)
+        # below: log calculation clipped because the posterior variance is 0 at the beginning of the diffusion chain
+        self.posterior_log_variance_clipped = torch.log(self.posterior_variance.clamp(min=1e-20))
+        self.posterior_mean_coef1 = self.betas * torch.sqrt(self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod)
+        self.posterior_mean_coef2 = (1.0 - self.alphas_cumprod_prev) * torch.sqrt(self.alphas) / (1.0 - self.alphas_cumprod)
 
-        self.posterior_mean_coef1 = (
-            self.betas * torch.sqrt(self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod)
-        )
-        self.posterior_mean_coef2 = (
-            (1.0 - self.alphas_cumprod_prev)
-            * torch.sqrt(self.alphas)
-            / (1.0 - self.alphas_cumprod)
-        )
-
-    def _extract(self, a, t, x_shape):
+    def _extract(self, a: torch.FloatTensor, t: torch.LongTensor, x_shape):
         # get the param of given timestep t
         batch_size = t.shape[0]
         out = a.to(t.device).gather(0, t).float()
         out = out.reshape(batch_size, *((1,) * (len(x_shape) - 1)))
         return out
 
-    def q_sample(self, x_start, t, noise=None):
+    def q_sample(self, x_start: torch.FloatTensor, t: torch.LongTensor, noise=None):
         # forward diffusion (using the nice property): q(x_t | x_0)
         if noise is None:
             noise = torch.randn_like(x_start)
@@ -351,14 +353,14 @@ class GaussianDiffusion:
 
         return sqrt_alphas_cumprod_t * x_start + sqrt_one_minus_alphas_cumprod_t * noise
 
-    def q_mean_variance(self, x_start, t):
+    def q_mean_variance(self, x_start: torch.FloatTensor, t: torch.LongTensor):
         # Get the mean and variance of q(x_t | x_0).
         mean = self._extract(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start
         variance = self._extract(1.0 - self.alphas_cumprod, t, x_start.shape)
         log_variance = self._extract(self.log_one_minus_alphas_cumprod, t, x_start.shape)
         return mean, variance, log_variance
 
-    def q_posterior_mean_variance(self, x_start, x_t, t):
+    def q_posterior_mean_variance(self, x_start: torch.FloatTensor, x_t: torch.FloatTensor, t: torch.LongTensor):
         # Compute the mean and variance of the diffusion posterior: q(x_{t-1} | x_t, x_0)
         posterior_mean = (
             self._extract(self.posterior_mean_coef1, t, x_t.shape) * x_start
@@ -368,14 +370,14 @@ class GaussianDiffusion:
         posterior_log_variance_clipped = self._extract(self.posterior_log_variance_clipped, t, x_t.shape)
         return posterior_mean, posterior_variance, posterior_log_variance_clipped
 
-    def predict_start_from_noise(self, x_t, t, noise):
+    def predict_start_from_noise(self, x_t: torch.FloatTensor, t: torch.LongTensor, noise: torch.FloatTensor):
         # compute x_0 from x_t and pred noise: the reverse of `q_sample`
         return (
             self._extract(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t -
             self._extract(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape) * noise
         )
 
-    def p_mean_variance(self, model, x_t, t, clip_denoised=True):
+    def p_mean_variance(self, model, x_t: torch.FloatTensor, t: torch.LongTensor, clip_denoised=True):
         # compute predicted mean and variance of p(x_{t-1} | x_t)
         # predict noise using model
         pred_noise = model(x_t, t)
@@ -387,7 +389,7 @@ class GaussianDiffusion:
         return model_mean, posterior_variance, posterior_log_variance
 
     @torch.no_grad()
-    def p_sample(self, model, x_t, t, clip_denoised=True):
+    def p_sample(self, model, x_t: torch.FloatTensor, t: torch.LongTensor, clip_denoised=True):
         # denoise_step: sample x_{t-1} from x_t and pred_noise
         # predict mean and variance
         model_mean, _, model_log_variance = self.p_mean_variance(model, x_t, t, clip_denoised=clip_denoised)
@@ -399,32 +401,27 @@ class GaussianDiffusion:
         return pred_img
 
     @torch.no_grad()
-    def p_sample_loop(self, model, shape):
+    def sample(self, model: nn.Module, image_size, batch_size=8, channels=3):
         # denoise: reverse diffusion
-        batch_size = shape[0]
+        shape = (batch_size, channels, image_size, image_size)
         device = next(model.parameters()).device
         # start from pure noise (for each example in the batch)
-        img = torch.randn(shape, device=device)
+        img = torch.randn(shape, device=device)  # x_T ~ N(0, 1)
         imgs = []
-        for i in tqdm(reversed(range(0, timesteps)), desc='sampling loop time step', total=timesteps):
-            img = self.p_sample(model, img, torch.full((batch_size,), i, device=device, dtype=torch.long))
+        for i in tqdm(reversed(range(0, self.timesteps)), desc='sampling loop time step', total=self.timesteps):
+            t = torch.full((batch_size,), i, device=device, dtype=torch.long)
+            img = self.p_sample(model, img, t)
             imgs.append(img.cpu().numpy())
         return imgs
 
-    @torch.no_grad()
-    def sample(self, model, image_size, batch_size=8, channels=3):
-        # sample new images
-        return self.p_sample_loop(model, shape=(batch_size, channels, image_size, image_size))
-
-    def train_losses(self, model, x_start, t):
+    def train_losses(self, model, x_start: torch.FloatTensor, t: torch.LongTensor):
         # compute train losses
-        # generate random noise
-        noise = torch.randn_like(x_start)
-        # get x_t
-        x_noisy = self.q_sample(x_start, t, noise=noise)
-        predicted_noise = model(x_noisy, t)
+        noise = torch.randn_like(x_start)  # random noise ~ N(0, 1)
+        x_noisy = self.q_sample(x_start, t, noise=noise)  # x_t ~ q(x_t | x_0)
+        predicted_noise = model(x_noisy, t)  # predict noise from noisy image
         loss = F.mse_loss(noise, predicted_noise)
         return loss
+
 
 batch_size = 64
 timesteps = 500
@@ -437,7 +434,6 @@ transform = transforms.Compose([
 # use MNIST dataset
 dataset = datasets.MNIST('./data', train=True, download=True, transform=transform)
 train_loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
-
 # define model and diffusion
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model = UNetModel(
@@ -466,12 +462,13 @@ for epoch in range(epochs):
         loss = gaussian_diffusion.train_losses(model, images, t)
 
         if step % 200 == 0:
-            print("Loss:", loss.item())
+            print("Epoch:", epoch, "Loss:", loss.item())
 
         loss.backward()
         optimizer.step()
 
-generated_images = gaussian_diffusion.sample(model, 28, batch_size=64, channels=1)
+batch_size = 64
+generated_images = gaussian_diffusion.sample(model, 28, batch_size=batch_size, channels=1)
 # generated_images: [timesteps, batch_size=64, channels=1, height=28, width=28]
 
 # generate new images
@@ -487,9 +484,9 @@ for n_row in range(8):
 
 # show the denoise steps
 fig = plt.figure(figsize=(12, 12), constrained_layout=True)
-gs = fig.add_gridspec(16, 16)
-
-for n_row in range(16):
+nrows = 16
+gs = fig.add_gridspec(nrows, 16)
+for n_row in range(nrows):
     for n_col in range(16):
         f_ax = fig.add_subplot(gs[n_row, n_col])
         t_idx = (timesteps // 16) * n_col if n_col < 15 else -1
