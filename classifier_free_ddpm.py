@@ -286,7 +286,7 @@ class ResidualBlock(TimestepBlock):
             self.shortcut = nn.Identity()
         cond_dim = time_channels
         self.gca = GlobalContext(dim_in=out_channels, dim_out=out_channels) if use_global_context else Always(1)
-        self.cross_attn = CrossAttention(dim=out_channels, context_dim=cond_dim,)
+        self.cross_attn = CrossAttention(dim=out_channels, context_dim=cond_dim)
 
     def forward(self, x, t, y):
         """
